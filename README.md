@@ -2,6 +2,8 @@
 
 The Blaze SDK is an easy-to-use toolkit that allows you to effortlessly integrate and utilize [Breeze 1 Click Checkout](https://breeze.in) & its services into your android app.
 
+For the shop journey (`in.breeze.shop`), see the example app in [`shop-example/`](shop-example/src/main/java/in/breeze/shopexample/MainActivity.kt).
+
 ## Android SDK Integration
 
 Follow the below steps to integrate Blaze SDK into your android application:

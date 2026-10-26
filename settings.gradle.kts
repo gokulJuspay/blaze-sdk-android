@@ -25,3 +25,4 @@ dependencyResolutionManagement {
 rootProject.name = "Blaze SDK"
 include(":app")
 include(":blaze")
+include(":shop-example")
