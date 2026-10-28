@@ -8,6 +8,7 @@ import android.content.SharedPreferences
 import android.content.pm.ResolveInfo
 import android.net.Uri
 import android.util.Log
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
@@ -16,12 +17,15 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import androidx.core.net.toUri
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import org.json.JSONArray
 import org.json.JSONObject
 import java.lang.ref.WeakReference
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicReference
 import androidx.core.content.edit
+import kotlin.math.roundToInt
 
 
 internal class BlazeWebView @SuppressLint(
@@ -30,12 +34,20 @@ internal class BlazeWebView @SuppressLint(
 ) constructor(
   context: Activity,
   private val initiatePayload: JSONObject,
+  container: ViewGroup?,
   private val callbackFn: CallbackFn
 ) {
 
   private val contextRef: WeakReference<Activity> = WeakReference(context)
+  private var containerRef: WeakReference<ViewGroup>? = container?.let { WeakReference(it) }
   private val webView: WebView = WebView(context)
+  @Volatile
   private var isWebViewReady: Boolean = false
+  @Volatile
+  private var isTerminated: Boolean = false
+  private var lastSafeMargin: String? = null
+  private val safeMarginLayoutListener =
+    View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> sendSafeMarginIfChanged() }
   private var consumingBackPress: Boolean = false
   private var eventQueue: HashMap<String, JSONObject> = hashMapOf()
   private val sharedPreferences: SharedPreferences
@@ -71,7 +83,12 @@ internal class BlazeWebView @SuppressLint(
     this.webView.settings.domStorageEnabled = true
     this.webView.webViewClient = blazeWebViewClient
     this.webView.addJavascriptInterface(this, "Native")
-    this.sendEvent("initiate", this.initiatePayload)
+    ViewCompat.setOnApplyWindowInsetsListener(this.webView) { view, insets ->
+      view.post { sendSafeMarginIfChanged() }
+      ViewCompat.onApplyWindowInsets(view, insets)
+    }
+    this.webView.addOnLayoutChangeListener(safeMarginLayoutListener)
+    this.sendEvent("initiate", JSONObject(this.initiatePayload.toString()))
     this.loadFrame(context)
   }
 
@@ -117,15 +134,17 @@ internal class BlazeWebView @SuppressLint(
   }
 
   fun terminate() {
+    isTerminated = true
     frameLoadTarget.set(null)
     this.sendEvent("terminate", JSONObject())
     hideView()
     contextRef.get()?.runOnUiThread {
+      getContainer()?.removeOnLayoutChangeListener(safeMarginLayoutListener)
       webView.stopLoading()
       webView.removeJavascriptInterface("Native")
       this.webView.destroy()
+      eventQueue.clear()
     }
-    eventQueue.clear()
   }
 
 
@@ -137,8 +156,7 @@ internal class BlazeWebView @SuppressLint(
     val eventDataJson = safeParseJson(eventData)
 
     if (eventName == "appReady") {
-      isWebViewReady = true
-      drainEventQueue()
+      contextRef.get()?.runOnUiThread { sendInitiate() }
     }
     if (eventName == "callbackEvent") {
       this.callbackFn.invoke(eventDataJson)
@@ -173,12 +191,12 @@ internal class BlazeWebView @SuppressLint(
         .put("eventName", event)
         .put("eventData", payload)
         .put("source", "blaze")
-    if (isWebViewReady) {
-      contextRef.get()?.runOnUiThread {
+    contextRef.get()?.runOnUiThread {
+      if (isWebViewReady) {
         webView.evaluateJavascript("javascript:onSDKEvent(JSON.stringify($eventMessage))") {}
+      } else {
+        eventQueue[event] = payload
       }
-    } else {
-      eventQueue[event] = payload
     }
   }
 
@@ -190,24 +208,82 @@ internal class BlazeWebView @SuppressLint(
     }
   }
 
+  private fun sendInitiate() {
+    if (isTerminated) {
+      return
+    }
+    val safeMargin = getSafeMargin()
+    lastSafeMargin = safeMargin.toString()
+    eventQueue["initiate"]?.optJSONObject("payload")?.put("safeMargin", safeMargin)
+    isWebViewReady = true
+    drainEventQueue()
+    getContainer()?.run {
+      removeOnLayoutChangeListener(safeMarginLayoutListener)
+      addOnLayoutChangeListener(safeMarginLayoutListener)
+    }
+  }
+
+  private fun sendSafeMarginIfChanged() {
+    if (isTerminated || lastSafeMargin == null) {
+      return
+    }
+    val safeMargin = getSafeMargin()
+    if (safeMargin.toString() != lastSafeMargin) {
+      lastSafeMargin = safeMargin.toString()
+      sendEvent("_sdkparams", JSONObject().put("safeMargin", safeMargin))
+    }
+  }
+
+  private fun getContainer(): ViewGroup? {
+    containerRef?.let { return it.get() }
+    val container: ViewGroup =
+      contextRef.get()?.findViewById(android.R.id.content) ?: return null
+    containerRef = WeakReference(container)
+    return container
+  }
+
   private fun renderView() {
     contextRef.get()?.runOnUiThread {
       this.webView.layoutParams = FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT,
         ViewGroup.LayoutParams.MATCH_PARENT
       )
-      val rootView =
-        contextRef.get()?.window?.decorView?.findViewById<ViewGroup>(android.R.id.content)
-      rootView?.addView(webView)
+      if (webView.parent == null) {
+        getContainer()?.addView(webView)
+        ViewCompat.requestApplyInsets(webView)
+      }
     }
+  }
+
+  private fun getSafeMargin(): JSONObject {
+    val safeMargin = JSONObject().put("top", 0).put("right", 0).put("bottom", 0).put("left", 0)
+    val activity = contextRef.get() ?: return safeMargin
+    val container = getContainer() ?: return safeMargin
+    val view = if (webView.isAttachedToWindow && webView.isLaidOut) webView else container
+    if (!view.isLaidOut) return safeMargin
+    val insets = ViewCompat.getRootWindowInsets(view)
+      ?.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+      ?: return safeMargin
+    val root = view.rootView
+    val location = IntArray(2)
+    view.getLocationInWindow(location)
+    val left = location[0] + view.paddingLeft
+    val top = location[1] + view.paddingTop
+    val right = location[0] + view.width - view.paddingRight
+    val bottom = location[1] + view.height - view.paddingBottom
+    val density = activity.resources.displayMetrics.density
+    fun toDp(px: Int): Int = (maxOf(px, 0) / density).roundToInt()
+    return safeMargin
+      .put("top", toDp(insets.top - top))
+      .put("right", toDp(right - (root.width - insets.right)))
+      .put("bottom", toDp(bottom - (root.height - insets.bottom)))
+      .put("left", toDp(insets.left - left))
   }
 
   private fun hideView() {
     contextRef.get()?.runOnUiThread {
       this.webView.layoutParams = FrameLayout.LayoutParams(0, 0)
-      val rootView =
-        contextRef.get()?.window?.decorView?.findViewById<ViewGroup>(android.R.id.content)
-      rootView?.removeView(webView)
+      getContainer()?.removeView(webView)
     }
   }
 
