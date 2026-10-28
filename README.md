@@ -105,6 +105,13 @@ The first parameter is your activity.
 blaze.initiate(this, initSDKPayload, ::blazeCallbackHandler)
 ```
 
+By default the SDK renders full screen, in the activity's `android.R.id.content` view.
+To render it inside your own view instead, pass a `FrameLayout` as the third parameter. The SDK covers the whole area of this `FrameLayout`.
+
+```kotlin
+blaze.initiate(this, initSDKPayload, checkoutContainer, ::blazeCallbackHandler)
+```
+
 ***Combined Example:***
 
 ```kotlin
