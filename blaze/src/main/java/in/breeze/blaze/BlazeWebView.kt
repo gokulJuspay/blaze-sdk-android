@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ResolveInfo
+import android.graphics.Color
 import android.net.Uri
 import android.util.Log
 import android.view.ViewGroup
@@ -69,6 +70,7 @@ internal class BlazeWebView @SuppressLint(
     this.webView.settings.javaScriptEnabled = true
     this.webView.settings.cacheMode = WebSettings.LOAD_DEFAULT
     this.webView.settings.domStorageEnabled = true
+    this.webView.setBackgroundColor(Color.TRANSPARENT)
     this.webView.webViewClient = blazeWebViewClient
     this.webView.addJavascriptInterface(this, "Native")
     this.sendEvent("initiate", this.initiatePayload)
